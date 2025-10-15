@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <title>Замерзающий — демо (улучшено)</title>
+  <style>
+    :root{
+      --bg-img:url('https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1003360/ss_62ba7742bcb15442d123a07c6c5c9a69517054d3.1920x1080.jpg?t=1694204730');
+      --accent: #bfc9d8;
+      --card-bg: linear-gradient(135deg,#2b2f33 0%, #3a3f44 100%);
+      --glass: rgba(255,255,255,0.04);
+    }
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    .stage{position:fixed;inset:0;overflow:hidden;display:flex;align-items:center;justify-content:center;background-color:#000;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+    .bg{position:absolute;inset:-25% -30% -25% -30%;background-image:var(--bg-img);background-size:cover;background-position:center center;transform-origin:center;will-change:transform,filter;transition:transform 0.25s linear;filter: saturate(1.02) contrast(1.05) brightness(0.85);z-index:0;animation: breathe 6s ease-in-out infinite}
+    @keyframes breathe{0%{transform:scale(1)}50%{transform:scale(1.02)}100%{transform:scale(1)}}
+    .bg::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,0.25),rgba(0,0,0,0.45));}
+    canvas.snow{position: absolute; inset:0; width:100%; height:100%; z-index: 2; pointer-events:none; display:block}
+    .center{position:relative;z-index:6;display:flex;flex-direction:column;gap:18px;align-items:center;padding:20px;max-width:92%;}
+    /* make title relative so the mask can sit above it */
+    .title{position:relative;font-size: clamp(36px, 7vw, 84px); color: #eaf1fb; letter-spacing:0.02em; font-weight:700; text-align:center; line-height:0.95; text-shadow: 0 6px 22px rgba(0,0,0,0.6); cursor:pointer; display:inline-block;}
+    .title a{color:inherit;text-decoration:none;display:inline-block}
+    /* smooth transform & opacity transitions for letters to avoid sudden jumps */
+    .title .letter{display:inline-block;opacity:0;transform:translateY(6px);will-change:transform,opacity;transition: transform 280ms cubic-bezier(.2,.9,.2,1), opacity 260ms ease}
+
+    /* subtle mask used to blink/pulse and hide abrupt transitions */
+    #titleMask{position:absolute;left:-12%;right:-12%;top:-28%;bottom:-20%;pointer-events:none;border-radius:8px;z-index:4;opacity:0;mix-blend-mode:screen;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.12), rgba(255,255,255,0));transition:opacity 220ms ease}
+
+    .card{margin-top:6px; padding:12px 16px; border-radius:14px; background:linear-gradient(180deg, rgba(240,240,240,0.04), rgba(20,20,20,0.06));backdrop-filter: blur(6px) saturate(1.1); color:#dfe9f3; font-size:14px; box-shadow: 0 10px 30px rgba(2,6,23,0.6); transform: translateZ(0);animation: floaty 4s ease-in-out infinite; transition: box-shadow .35s, transform .2s; cursor:pointer; user-select:none; text-align:center; max-width:720px;}
+    @keyframes floaty{0%{transform:translateY(0)}50%{transform:translateY(-8px)}100%{transform:translateY(0)}}
+    .card:active{transform:translateY(-2px) scale(0.998)}
+    .card.glow{box-shadow:0 0 0 3px rgba(160,170,180,0.04), 0 18px 40px rgba(40,50,60,0.6), 0 0 40px rgba(180,190,200,0.08) inset;}
+    @media (max-width:520px){.card{font-size:13px;padding:10px 14px;border-radius:12px}}
+    .hidden{display:none}
+    .hint{font-size:12px;color:rgba(255,255,255,0.6);margin-top:4px}
+    *{box-sizing:border-box}
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="bg" id="bg"></div>
+    <canvas class="snow" id="snow"></canvas>
+    <div class="center">
+      <h1 class="title" id="title"><a href="https://t.me/botnet_society" target="_blank" rel="noopener noreferrer" id="titleLink"></a>
+        <!-- mask element to create a quick blink/fade that hides abrupt motion -->
+        <div id="titleMask" aria-hidden="true"></div>
+      </h1>
+      <div class="card" id="card">Backend developer of telegram mods, user-bots & scripts | Web-App Developer | Python (Middle) • C++ (Junior)</div>
+      <div class="hint"></div>
+    </div>
+  </div>
+
+  <script>
+    // --------- Config ---------
+    const TEXT = 'Замерзающий';
+    const TYPING_SPEED = 80; // ms per letter
+    const AFTER_DELAY = 1000; // ms until shake begins after typing
+    const TOTAL_ANIM_MS = 4200; // total approximate duration for shake+crumble
+    const DISPERSE_WAIT = 700; // time after crumble when blinking starts
+    const BLINK_DURATION = 700; // blink phase
+    const REASSEMBLE_DURATION = 1200; // base duration for a shard to move to its target (ms)
+
+    // Elements
+    const titleEl = document.getElementById('title');
+    const titleLink = document.getElementById('titleLink');
+    const titleMask = document.getElementById('titleMask');
+    const card = document.getElementById('card');
+    const bg = document.getElementById('bg');
+
+    // prepare title as clickable link + span letters
+    function setTitleText(text){
+      titleLink.innerHTML = '';
+      for(let ch of text){
+        const sp = document.createElement('span');
+        sp.className = 'letter';
+        sp.textContent = ch;
+        titleLink.appendChild(sp);
+      }
+    }
+    setTitleText(TEXT);
+
+    // Typing animation (only once)
+    let typedOnce = false;
+    async function typeLetters(){
+      if(typedOnce) return;
+      typedOnce = true;
+      const letters = Array.from(titleLink.querySelectorAll('.letter'));
+      for(let i=0;i<letters.length;i++){
+        await new Promise(r=>setTimeout(r,TYPING_SPEED));
+        letters[i].style.opacity = '1';
+        letters[i].style.transform = 'translateY(0)';
+      }
+    }
+
+    // small utility: quick mask pulse to hide abrupt transitions
+    function maskPulse(peak = 0.14, inMs = 90, outMs = 260){
+      if(!titleMask) return;
+      // quick in
+      titleMask.style.transition = `opacity ${inMs}ms ease`;
+      titleMask.style.opacity = String(peak);
+      // then fade out
+      setTimeout(()=>{
+        titleMask.style.transition = `opacity ${outMs}ms cubic-bezier(.2,.9,.2,1)`;
+        titleMask.style.opacity = '0';
+      }, inMs);
+    }
+
+    // Canvas setup
+    const canvas = document.getElementById('snow');
+    const ctx = canvas.getContext('2d');
+    let W = canvas.width = innerWidth; let H = canvas.height = innerHeight;
+    function resizeCanvas(){ W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+    window.addEventListener('resize', ()=>{ resizeCanvas(); computeLetterTargets(); });
+    resizeCanvas();
+
+    // flakes
+    const flakes = [];
+    for(let i=0;i<120;i++) flakes.push(createFlake());
+    function createFlake(){ return { x: Math.random()*W, y: Math.random()*H, r: 0.6 + Math.random()*2.2, vx: (Math.random()-0.5)*0.3, vy: 0.3 + Math.random()*0.7, opacity: 0.04 + Math.random()*0.12 } }
+
+    // shards
+    const shards = [];
+    // preallocated temporary arrays for performance
+    let letterTargets = []; // per-letter arrays of {x,y}
+
+    // compute pixel-accurate targets for each letter using offscreen canvas
+    function computeLetterTargets(){
+      letterTargets = [];
+      const letters = Array.from(titleLink.querySelectorAll('.letter'));
+      if(!letters.length) return;
+      const titleRect = titleLink.getBoundingClientRect();
+
+      // create offscreen canvas sized to title area
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const off = document.createElement('canvas');
+      off.width = Math.max(1, Math.floor(titleRect.width * dpr));
+      off.height = Math.max(1, Math.floor(titleRect.height * dpr));
+      const octx = off.getContext('2d');
+      octx.scale(dpr, dpr);
+
+      // match font metrics to visible letters
+      const cs = getComputedStyle(letters[0]);
+      const fontSize = parseFloat(cs.fontSize) || 64;
+      const fontWeight = cs.fontWeight || '700';
+      const fontFamily = cs.fontFamily || 'Inter, system-ui, Arial';
+      octx.fillStyle = '#000';
+      octx.clearRect(0,0,off.width,off.height);
+      octx.textBaseline = 'top';
+      octx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+
+      // draw each letter at its exact position relative to title left/top
+      letters.forEach((el, idx)=>{
+        const r = el.getBoundingClientRect();
+        const x = Math.round(r.left - titleRect.left);
+        const y = Math.round(r.top - titleRect.top);
+        octx.fillText(el.textContent, x + 0.5, y + 0.5);
+      });
+
+      // sample pixels and bucket by letter bounding box
+      const step = 4; // sampling step. smaller = more precision but heavier
+      const image = octx.getImageData(0,0,Math.max(1,Math.floor(titleRect.width)),Math.max(1,Math.floor(titleRect.height))).data;
+      const buckets = letters.map(()=>[]);
+      for(let y=0;y<Math.floor(titleRect.height);y+=step){
+        for(let x=0;x<Math.floor(titleRect.width);x+=step){
+          const idx = (y*Math.floor(titleRect.width) + x)*4;
+          const alpha = image[idx+3];
+          if(alpha > 40){
+            // find which letter bbox contains this point
+            for(let i=0;i<letters.length;i++){
+              const r = letters[i].getBoundingClientRect();
+              const rx = Math.round(r.left - titleRect.left);
+              const ry = Math.round(r.top - titleRect.top);
+              if(x >= rx && x < rx + Math.ceil(r.width) && y >= ry && y < ry + Math.ceil(r.height)){
+                buckets[i].push({x: titleRect.left + x + 0.5, y: titleRect.top + y + 0.5});
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // fallback and limit per-bucket
+      const MAX_POINTS_PER_LETTER = 300;
+      letterTargets = buckets.map((b, i)=>{
+        if(!b || b.length===0){
+          const r = letters[i].getBoundingClientRect();
+          return [{x: r.left + r.width/2, y: r.top + r.height/2}];
+        }
+        // if too many points, pick a sampled subset uniformly
+        if(b.length > MAX_POINTS_PER_LETTER){
+          const out = [];
+          const stepIdx = Math.floor(b.length / MAX_POINTS_PER_LETTER);
+          for(let j=0;j<b.length;j+=stepIdx) out.push(b[j]);
+          return out;
+        }
+        return b;
+      });
+    }
+
+    // spawn shards for a given letter box and attach homeIndex
+    function spawnShardsForLetter(box, amount, intensityMult=1, homeIndex=0){
+      const colors = ['#f8fcff','#dff4ff','#cfeaff','#eaf6ff'];
+      for(let i=0;i<amount;i++){
+        const px = box.left + Math.random()*box.width;
+        const py = box.top + Math.random()*box.height;
+        const vx = (Math.random()-0.5)*8 * intensityMult;
+        const vy = (Math.random()-1.8)*8 * intensityMult;
+        const size = 2 + Math.random()*6;
+        const life = 700 + Math.random()*1200;
+        const rot = Math.random()*360;
+        const rv = (Math.random()-0.5)*18;
+        const color = colors[Math.floor(Math.random()*colors.length)];
+        shards.push({x:px, y:py, vx, vy, size, life, born: performance.now(), alpha:1, rot, rv, color, state:'disperse', homeIndex, targetX:null, targetY:null, moveStart:null, moveDur:null, startX:null, startY:null});
+      }
+    }
+
+    // draw loop
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      // flakes
+      for(let f of flakes){
+        ctx.beginPath(); ctx.globalAlpha = f.opacity; ctx.fillStyle = '#ffffff'; ctx.arc(f.x,f.y,f.r,0,Math.PI*2); ctx.fill();
+        f.x += f.vx; f.y += f.vy;
+        if(f.y>H+10){ f.y = -10; f.x = Math.random()*W }
+        if(f.x<-20) f.x = W+20; if(f.x>W+20) f.x = -20;
+      }
+
+      // shards
+      const now = performance.now();
+      for(let i = shards.length-1; i>=0; i--){
+        const s = shards[i];
+        if(s.state === 'disperse'){
+          s.vy += 0.22; s.vx *= 0.995; s.vy *= 0.998; s.x += s.vx; s.y += s.vy; s.rot += s.rv * 0.04; s.alpha = Math.max(0.08, 1 - (now - s.born) / (s.life+400));
+        } else if(s.state === 'blink'){
+          s.vx *= 0.98; s.vy *= 0.98; s.vy += 0.08; s.x += s.vx; s.y += s.vy; s.rot += s.rv * 0.02; s.alpha = 0.25 + 0.75 * Math.abs(Math.sin((now+s.born)/120));
+        } else if(s.state === 'reassemble'){
+          const traw = Math.max(0, now - s.moveStart);
+          const t = Math.min(1, traw / s.moveDur);
+          // cubic ease-out
+          const ease = 1 - Math.pow(1 - t, 3);
+          s.x = s.startX + (s.targetX - s.startX) * ease;
+          s.y = s.startY + (s.targetY - s.startY) * ease;
+          s.rot += s.rv * 0.02;
+          s.alpha = 0.2 + 0.8 * ease;
+          if(t >= 1) s.state = 'done';
+        }
+
+        if(s.state !== 'done'){
+          ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.rot * Math.PI/180); ctx.globalAlpha = s.alpha; ctx.fillStyle = s.color; ctx.fillRect(-s.size/2, -s.size/2, s.size, s.size*0.6); ctx.restore();
+        }
+      }
+      ctx.globalAlpha = 1;
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+
+    // Improved shake + crumble sequence with gentle mask pulses to hide abrupt jumps
+    function shakeThenCrumble(totalDuration = TOTAL_ANIM_MS){
+      const letters = Array.from(titleLink.querySelectorAll('.letter'));
+      const start = performance.now();
+      const shakeDuration = Math.floor(totalDuration * 0.62);
+      const crumbleDuration = totalDuration - shakeDuration;
+      const seeds = letters.map(()=>({rx: (Math.random()-0.5)*1000, ry: (Math.random()-0.5)*1000, rotSeed: Math.random()*1000}));
+      function easeInOut(t){ return t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2; }
+
+      function frame(){
+        const now = performance.now();
+        const elapsed = now - start;
+        // pulse mask at the very start of shake to hide the sudden first frame
+        if(elapsed < 60 && !frame.maskedOnce){ frame.maskedOnce = true; maskPulse(0.14, 80, 300); }
+
+        if(elapsed < shakeDuration){
+          const p = elapsed / shakeDuration;
+          const amp = 1 + easeInOut(p) * 8;
+          const skewMax = 0.6 + easeInOut(p) * 6;
+          const scaleVar = 0.002 + easeInOut(p) * 0.02;
+          letters.forEach((el, i)=>{
+            const seed = seeds[i];
+            const tx = (Math.sin((now+seed.rx)/140 + i) * amp) + (Math.cos((now+seed.ry)/200) * amp*0.28);
+            const ty = (Math.cos((now+seed.ry)/160 + i) * amp*0.48);
+            const rot = Math.sin((now+seed.rotSeed)/180 + i) * (skewMax);
+            const sx = 1 + Math.sin((now+seed.rx)/220 + i) * scaleVar;
+            const sy = 1 + Math.cos((now+seed.ry)/200 + i) * scaleVar;
+            el.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) rotate(${rot.toFixed(2)}deg) scale(${sx.toFixed(3)},${sy.toFixed(3)})`;
+            el.style.opacity = '1';
+          });
+          requestAnimationFrame(frame); return;
+        }
+
+        if(elapsed < shakeDuration + crumbleDuration){
+          if(!frame.hasShattered){
+            frame.hasShattered = true;
+            // quick mask to soften the hide+spawn moment
+            maskPulse(0.16, 60, 320);
+            const lettersRects = letters.map(el=>el.getBoundingClientRect());
+            // fade letters out (CSS transition will smooth)
+            letters.forEach((el)=>{ el.style.opacity = 0; });
+            computeLetterTargets();
+            // spawn shards per letter and store homeIndex
+            lettersRects.forEach((r, idx)=>{
+              // amount scales with letter area but clamped
+              const area = r.width * r.height;
+              const amount = Math.floor(Math.max(18, Math.min(80, area/120)));
+              spawnShardsForLetter(r, amount, 1.15, idx);
+            });
+
+            // after a short disperse wait, start blink then reassemble
+            setTimeout(()=>{ startBlinkThenReassemble(); }, DISPERSE_WAIT);
+          }
+          requestAnimationFrame(frame);
+          return;
+        }
+      }
+      requestAnimationFrame(frame);
+    }
+
+    // Blink then reassemble — improved mapping: shards -> targets within same letter
+    function startBlinkThenReassemble(){
+      const now = performance.now();
+      // set blink state
+      shards.forEach(s=>{ if(s.state==='disperse') s.state='blink'; });
+
+      setTimeout(()=>{
+        // ensure targets up to date
+        computeLetterTargets();
+        const letters = Array.from(titleLink.querySelectorAll('.letter'));
+        const titleRect = titleLink.getBoundingClientRect();
+
+        // build per-letter target pools (shuffled)
+        const pools = letterTargets.map(arr=>{ const copy = (arr || []).slice(); for(let i=copy.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [copy[i],copy[j]]=[copy[j],copy[i]];} return copy; });
+
+        // group shards by homeIndex
+        const groups = {};
+        shards.forEach((s, idx)=>{ if(s.homeIndex == null) s.homeIndex = 0; (groups[s.homeIndex] = groups[s.homeIndex]||[]).push(s); });
+
+        const now2 = performance.now();
+        // assign targets for each group
+        Object.keys(groups).forEach(key=>{
+          const gi = parseInt(key,10);
+          const group = groups[gi];
+          const pool = pools[gi] && pools[gi].length ? pools[gi] : [{x: titleRect.left + titleRect.width/2, y: titleRect.top + titleRect.height/2}];
+
+          // if more shards than targets, we'll reuse targets in a round-robin fashion
+          for(let i=0;i<group.length;i++){
+            const s = group[i];
+            const tgt = pool[i % pool.length];
+            s.targetX = tgt.x; s.targetY = tgt.y;
+            s.startX = s.x; s.startY = s.y;
+            const dist = Math.hypot(s.targetX - s.startX, s.targetY - s.startY);
+            const delay = Math.min(900, Math.max(60, dist * 0.28) ) + Math.random()*60; // stagger based on distance
+            s.moveStart = now2 + delay;
+            // give each shard a slightly different duration so motion feels organic
+            s.moveDur = REASSEMBLE_DURATION * (0.85 + Math.random()*0.5);
+            s.state = 'reassemble';
+          }
+        });
+
+        // when we expect most to be finished, reveal letters and cleanup gently
+        const maxEnd = now2 + REASSEMBLE_DURATION + 1200;
+        setTimeout(()=>{
+          const letters = Array.from(titleLink.querySelectorAll('.letter'));
+          // soft mask before reveal, then reveal letters with transition
+          maskPulse(0.16, 90, 320);
+          setTimeout(()=>{
+            letters.forEach(l=>{ l.style.transform=''; l.style.opacity = 1; });
+          }, 90);
+
+          // remove any remaining shards after a small delay so final overlap looks good
+          setTimeout(()=>{ shards.length = 0; }, 240);
+
+          // schedule next cycle but leave a graceful pause
+          setTimeout(()=>{ shakeThenCrumble(TOTAL_ANIM_MS); }, 1600 + Math.random()*1200);
+        }, Math.max(800, REASSEMBLE_DURATION + 200));
+
+      }, BLINK_DURATION);
+    }
+
+    // main flow: type once, then repeat explode->reassemble indefinitely
+    async function startFlow(){
+      // ensure letters are in baseline state
+      const letters = Array.from(titleLink.querySelectorAll('.letter'));
+      clearLetters();
+      await new Promise(r=>setTimeout(r,140));
+      await typeLetters();
+      // compute targets once after typing completes
+      setTimeout(()=>{ computeLetterTargets(); }, 300);
+      // start first cycle after short delay
+      setTimeout(()=>{ shakeThenCrumble(TOTAL_ANIM_MS); }, AFTER_DELAY + 400);
+    }
+
+    function clearLetters(){ const letters = titleLink.querySelectorAll('.letter'); letters.forEach(l=>{ l.style.opacity=0; l.style.transform='translateY(6px)'; l.style.position='static'; l.style.left='auto'; l.style.top='auto'; }); }
+
+    startFlow();
+
+    // recompute targets on font load (helps when webfonts are used)
+    if(document.fonts && document.fonts.ready){ document.fonts.ready.then(()=>{ computeLetterTargets(); }); }
+
+    // Smooth background parallax
+    let targetNX = 0, targetNY = 0; let curNX = 0, curNY = 0;
+    function applyParallaxValues(nx, ny){ targetNX = Math.max(-1, Math.min(1, nx)); targetNY = Math.max(-1, Math.min(1, ny)); }
+    function rafParallax(){ const ease = 0.09; curNX += (targetNX - curNX) * ease; curNY += (targetNY - curNY) * ease; const tx = curNX * (Math.min(22, window.innerWidth*0.014)); const ty = curNY * (Math.min(22, window.innerHeight*0.013)); bg.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(1.02)`; requestAnimationFrame(rafParallax); }
+    requestAnimationFrame(rafParallax);
+    window.addEventListener('mousemove', (ev)=>{ const nx = (ev.clientX / innerWidth - 0.5)*2; const ny = (ev.clientY / innerHeight - 0.5)*2; applyParallaxValues(nx, ny); });
+
+    // device orientation
+    function handleDeviceOrientation(e){ const gamma = e.gamma || 0; const beta = e.beta || 0; const nx = Math.max(-1, Math.min(1, gamma/45)); const ny = Math.max(-1, Math.min(1, beta/45)); applyParallaxValues(nx, ny); }
+    if(window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function'){
+      window.addEventListener('touchstart', function ask(){ DeviceOrientationEvent.requestPermission().then(res=>{ if(res==='granted'){ window.addEventListener('deviceorientation',handleDeviceOrientation); }}).catch(()=>{}); window.removeEventListener('touchstart',ask); });
+    } else if(window.DeviceOrientationEvent){ window.addEventListener('deviceorientation', handleDeviceOrientation); }
+
+    // card glow
+    card.addEventListener('click', ()=>{ card.classList.add('glow'); setTimeout(()=>{ card.classList.remove('glow'); }, 1200); });
+
+    // Accessibility
+    titleLink.setAttribute('role','link');
+
+    // Performance tweak
+    if(innerWidth < 640){ flakes.length = 60 }
+
+  </script>
+</body>
+</html>
